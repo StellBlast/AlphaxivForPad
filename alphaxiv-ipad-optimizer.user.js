@@ -46,17 +46,19 @@
         constructor() {
             this.pdfContainer = null;
             this.sidebar = null;
+            this.toolbar = null;
         }
 
         scan() {
             // New "Pair Finding" Strategy: Look for a layout where PDF and Sidebar are siblings
             // or close relatives. This is more robust than isolated searches.
-            const candidates = Array.from(document.querySelectorAll('div, section, main, aside'));
+            const candidates = Array.from(document.querySelectorAll('div, section, main, aside, nav, header'));
             const viewportW = window.innerWidth;
             const viewportH = window.innerHeight;
 
             const potentialSidebars = [];
             const potentialPDFs = [];
+            let potentialToolbar = null;
 
             candidates.forEach(el => {
                 const rect = el.getBoundingClientRect();
@@ -75,6 +77,18 @@
                 if (widthRatio > 0.40 && heightRatio > 0.5) {
                     potentialPDFs.push(el);
                 }
+
+                // Heuristic for Toolbar: Look for a narrow strip (vertical or horizontal)
+                // that contains buttons (button, svg, a)
+                if (!potentialToolbar) {
+                     const isToolbarShape = (widthRatio > 0.8 && heightRatio < 0.15) || (widthRatio < 0.15 && heightRatio > 0.5);
+                     if (isToolbarShape) {
+                         const buttons = el.querySelectorAll('button, svg, a[role="button"]');
+                         if (buttons.length > 2) {
+                             potentialToolbar = el;
+                         }
+                     }
+                }
             });
 
             // Attempt to find a pair that are siblings
@@ -90,7 +104,8 @@
                     log(`Found Pair! PDF: <${pdfSibling.tagName}>, Sidebar: <${sidebar.tagName}>`);
                     this.pdfContainer = pdfSibling;
                     this.sidebar = sidebar;
-                    return { pdf: this.pdfContainer, sidebar: this.sidebar };
+                    if (potentialToolbar) this.toolbar = potentialToolbar;
+                    return { pdf: this.pdfContainer, sidebar: this.sidebar, toolbar: this.toolbar };
                 }
             }
 
@@ -102,7 +117,8 @@
 
             return {
                 pdf: this.pdfContainer,
-                sidebar: this.sidebar
+                sidebar: this.sidebar,
+                toolbar: this.toolbar
             };
         }
 
@@ -164,6 +180,154 @@
 
                 return widthRatio > 0.20 && widthRatio < 0.45 && heightRatio > 0.5;
             });
+        }
+    }
+
+    class ToolManager {
+        constructor(scanner) {
+            this.scanner = scanner;
+            this.isToolsVisible = false;
+            this.container = null;
+            this.toggleButton = null;
+            this.initStyles();
+        }
+
+        initStyles() {
+             addStyle(`
+                .ax-ipad-tools-panel {
+                    position: fixed !important;
+                    top: 50% !important;
+                    right: 0 !important;
+                    transform: translateY(-50%) translateX(100%);
+                    width: 60px !important;
+                    background: rgba(255, 255, 255, 0.95) !important;
+                    backdrop-filter: blur(10px) !important;
+                    -webkit-backdrop-filter: blur(10px) !important;
+                    border-top-left-radius: 16px !important;
+                    border-bottom-left-radius: 16px !important;
+                    box-shadow: -4px 0 20px rgba(0,0,0,0.15) !important;
+                    padding: 16px 8px !important;
+                    display: flex !important;
+                    flex-direction: column !important;
+                    gap: 16px !important;
+                    z-index: 10001 !important;
+                    transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+                }
+
+                .ax-ipad-tools-visible {
+                    transform: translateY(-50%) translateX(0%) !important;
+                }
+
+                .ax-ipad-tool-btn {
+                    width: 44px;
+                    height: 44px;
+                    border-radius: 12px;
+                    background: #f0f0f0;
+                    border: none;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                    color: #333;
+                    font-size: 20px; /* Icon size */
+                    transition: transform 0.1s, background 0.2s;
+                }
+
+                .ax-ipad-tool-btn:active {
+                    transform: scale(0.92);
+                    background: #e0e0e0;
+                }
+
+                .ax-ipad-tool-toggle {
+                    position: fixed;
+                    top: 50%;
+                    right: 0;
+                    transform: translateY(-50%);
+                    width: 24px;
+                    height: 48px;
+                    background: #007AFF;
+                    border-top-left-radius: 12px;
+                    border-bottom-left-radius: 12px;
+                    z-index: 10002;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                    box-shadow: -2px 0 8px rgba(0,0,0,0.2);
+                    transition: right 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+                }
+
+                .ax-ipad-tool-toggle svg {
+                    color: white;
+                    width: 16px;
+                    height: 16px;
+                }
+
+                /* Shift toggle when panel is visible */
+                .ax-ipad-tools-visible + .ax-ipad-tool-toggle,
+                .ax-ipad-tool-toggle.active {
+                    right: 60px; /* Width of panel */
+                    border-top-right-radius: 0;
+                    border-bottom-right-radius: 0;
+                }
+            `);
+        }
+
+        createPanel() {
+            if (this.container) return;
+
+            this.container = document.createElement('div');
+            this.container.className = 'ax-ipad-tools-panel';
+
+            // Heuristic: If we found a toolbar, try to clone its buttons
+            // Otherwise, provide default tools
+            const tools = [
+                { icon: '🖊️', action: () => this.simulateToolClick('highlight') },
+                { icon: '💬', action: () => this.simulateToolClick('comment') },
+                { icon: '📝', action: () => this.simulateToolClick('note') },
+                { icon: '🔍', action: () => this.simulateToolClick('zoom') }
+            ];
+
+            tools.forEach(tool => {
+                const btn = document.createElement('button');
+                btn.className = 'ax-ipad-tool-btn';
+                btn.innerHTML = tool.icon;
+                btn.onclick = tool.action;
+                // Handle touch
+                btn.ontouchend = (e) => {
+                    e.preventDefault();
+                    tool.action();
+                };
+                this.container.appendChild(btn);
+            });
+
+            document.body.appendChild(this.container);
+
+            // Create Toggle Handle
+            this.toggleButton = document.createElement('div');
+            this.toggleButton.className = 'ax-ipad-tool-toggle';
+            this.toggleButton.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>`;
+            this.toggleButton.onclick = () => this.togglePanel();
+            document.body.appendChild(this.toggleButton);
+        }
+
+        togglePanel() {
+            this.isToolsVisible = !this.isToolsVisible;
+            if (this.isToolsVisible) {
+                this.container.classList.add('ax-ipad-tools-visible');
+                this.toggleButton.classList.add('active');
+                this.toggleButton.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>`;
+            } else {
+                this.container.classList.remove('ax-ipad-tools-visible');
+                this.toggleButton.classList.remove('active');
+                this.toggleButton.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>`;
+            }
+        }
+
+        simulateToolClick(type) {
+            log(`Tool clicked: ${type}`);
+            // TODO: Implement actual logic to trigger site's native tools based on heuristic matching
+            // For now, this is a placeholder for the UI
         }
     }
 
@@ -278,41 +442,146 @@
     }
 
     class InteractionManager {
-        constructor() {
+        constructor(toolManager) {
+            this.toolManager = toolManager;
             this.lastSelectionRect = null;
             this.observer = null;
             this.isInteracting = false;
+            this.quickActionBar = null;
+            this.initStyles();
+        }
+
+        initStyles() {
+            addStyle(`
+                .ax-ipad-quick-action-bar {
+                    position: fixed;
+                    z-index: 10005;
+                    display: flex;
+                    gap: 8px;
+                    padding: 8px;
+                    background: #2c2c2e;
+                    border-radius: 12px;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    opacity: 0;
+                    pointer-events: none;
+                    transition: opacity 0.2s;
+                    transform: translateX(-50%);
+                }
+                .ax-ipad-quick-action-bar.visible {
+                    opacity: 1;
+                    pointer-events: auto;
+                }
+                .ax-ipad-action-btn {
+                    width: 40px;
+                    height: 40px;
+                    border-radius: 8px;
+                    border: none;
+                    background: #3a3a3c;
+                    color: white;
+                    font-size: 18px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                }
+                .ax-ipad-action-btn:active {
+                    background: #48484a;
+                }
+            `);
         }
 
         init() {
+            this.createQuickActionBar();
             this.listenToSelection();
             this.hijackCommentBubble();
         }
 
+        createQuickActionBar() {
+             if (this.quickActionBar) return;
+
+             this.quickActionBar = document.createElement('div');
+             this.quickActionBar.className = 'ax-ipad-quick-action-bar';
+
+             // Actions: Highlight, Comment
+             const actions = [
+                 { icon: '🖊️', type: 'highlight' },
+                 { icon: '💬', type: 'comment' }
+             ];
+
+             actions.forEach(action => {
+                 const btn = document.createElement('button');
+                 btn.className = 'ax-ipad-action-btn';
+                 btn.innerHTML = action.icon;
+                 btn.ontouchend = (e) => {
+                     e.preventDefault();
+                     e.stopPropagation();
+                     this.toolManager.simulateToolClick(action.type);
+                     this.hideQuickActionBar();
+                 };
+                 // Also handle click for testing/desktop
+                 btn.onclick = (e) => {
+                     e.preventDefault();
+                     e.stopPropagation();
+                     this.toolManager.simulateToolClick(action.type);
+                     this.hideQuickActionBar();
+                 }
+                 this.quickActionBar.appendChild(btn);
+             });
+
+             document.body.appendChild(this.quickActionBar);
+        }
+
         listenToSelection() {
             // Track selection changes
-            document.addEventListener('selectionchange', () => {
+            const handleSelection = () => {
                 const selection = window.getSelection();
                 if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
                     const range = selection.getRangeAt(0);
                     this.lastSelectionRect = range.getBoundingClientRect();
                     this.isInteracting = true;
+
+                    // Show our custom bar
+                    this.showQuickActionBar(this.lastSelectionRect);
+
                     // Reset interaction flag after a delay
                     setTimeout(() => { this.isInteracting = false; }, 2000);
+                } else {
+                    this.hideQuickActionBar();
                 }
+            };
+
+            document.addEventListener('selectionchange', () => {
+                // Debounce selection change slightly
+                setTimeout(handleSelection, 50);
             });
 
             // Mobile safari specific: ensure we capture touch end to validate selection
             document.addEventListener('touchend', () => {
-                setTimeout(() => {
-                    const selection = window.getSelection();
-                    if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
-                        const range = selection.getRangeAt(0);
-                        this.lastSelectionRect = range.getBoundingClientRect();
-                        this.isInteracting = true;
-                    }
-                }, 100); // Small delay to let selection finalize
+                setTimeout(handleSelection, 100);
             });
+        }
+
+        showQuickActionBar(rect) {
+            if (!this.quickActionBar) return;
+
+            // Calculate position: Centered above selection
+            let top = rect.top - 60; // Bar height + padding
+            let left = rect.left + (rect.width / 2);
+
+            // Boundary checks
+            if (top < 10) top = rect.bottom + 10; // Flip below if no space on top
+            if (left < 60) left = 60; // Left edge
+            if (left > window.innerWidth - 60) left = window.innerWidth - 60; // Right edge
+
+            this.quickActionBar.style.top = `${top}px`;
+            this.quickActionBar.style.left = `${left}px`;
+            this.quickActionBar.classList.add('visible');
+        }
+
+        hideQuickActionBar() {
+            if (this.quickActionBar) {
+                this.quickActionBar.classList.remove('visible');
+            }
         }
 
         hijackCommentBubble() {
@@ -384,7 +653,8 @@
     // Main Execution
     const scanner = new DOMScanner();
     const uiManager = new UIManager(scanner);
-    const interactionManager = new InteractionManager();
+    const toolManager = new ToolManager(scanner);
+    const interactionManager = new InteractionManager(toolManager);
 
     // Wait for body to be ready for interaction manager
     const initInteraction = setInterval(() => {
@@ -395,10 +665,18 @@
     }, 100);
 
     const runScan = () => {
-        const { pdf, sidebar } = scanner.scan();
+        const { pdf, sidebar, toolbar } = scanner.scan();
         if (pdf && sidebar) {
              uiManager.transformSidebar();
              uiManager.injectFAB();
+             toolManager.createPanel();
+
+             // If we found a native toolbar, hide it as we replaced it (optional, safe heuristic needed)
+             if (toolbar && toolbar.style.display !== 'none') {
+                 // log('Hiding native toolbar in favor of floating panel');
+                 // toolbar.style.display = 'none'; // Commented out for safety until heuristic is battle-tested
+             }
+
              return true; // Found and transformed
         }
         return false;
