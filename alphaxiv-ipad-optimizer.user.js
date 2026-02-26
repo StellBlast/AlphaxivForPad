@@ -6,7 +6,7 @@
 // @author       Jules
 // @match        *://*.alphaxiv.org/*
 // @grant        GM_addStyle
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function() {
@@ -19,9 +19,24 @@
         if (typeof GM_addStyle !== 'undefined') {
             GM_addStyle(css);
         } else {
-            const style = document.createElement('style');
-            style.textContent = css;
-            document.head.appendChild(style);
+            const inject = () => {
+                const style = document.createElement('style');
+                style.textContent = css;
+                (document.head || document.documentElement).appendChild(style);
+            };
+
+            if (document.head || document.documentElement) {
+                inject();
+            } else {
+                // Wait for head/documentElement if they don't exist yet (very rare in document-start)
+                const observer = new MutationObserver(() => {
+                    if (document.head || document.documentElement) {
+                        observer.disconnect();
+                        inject();
+                    }
+                });
+                observer.observe(document, { childList: true, subtree: true });
+            }
         }
     }
 
@@ -371,20 +386,51 @@
     const uiManager = new UIManager(scanner);
     const interactionManager = new InteractionManager();
 
-    interactionManager.init();
+    // Wait for body to be ready for interaction manager
+    const initInteraction = setInterval(() => {
+        if (document.body) {
+            clearInterval(initInteraction);
+            interactionManager.init();
+        }
+    }, 100);
 
     const runScan = () => {
         const { pdf, sidebar } = scanner.scan();
         if (pdf && sidebar) {
              uiManager.transformSidebar();
              uiManager.injectFAB();
+             return true; // Found and transformed
         }
+        return false;
     };
 
-    // Run immediately
+    // 1. Immediate Attempt (might fail if DOM is empty)
     runScan();
 
-    // Periodic check for SPA navigation or delayed loading
+    // 2. Aggressive Bootstrapper using MutationObserver
+    // This catches elements as they are added to the DOM during initial load
+    const bootstrapper = new MutationObserver((mutations) => {
+        // Debounce slightly or just run. Since we want speed, we run directly but maybe check if it's worth it.
+        // Simple check: if we found it, we can stop this observer or relax it.
+        const success = runScan();
+        if (success) {
+            log('Initial layout found. Disconnecting bootstrapper.');
+            bootstrapper.disconnect();
+        }
+    });
+
+    // Start observing document element immediately
+    bootstrapper.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+
+    // 3. Fallback & SPA Navigation Handler
+    // Keep a periodic check to handle route changes where the DOM might be replaced
     setInterval(runScan, 2000);
+
+    // 4. Also run on standard window load events to be sure
+    window.addEventListener('DOMContentLoaded', runScan);
+    window.addEventListener('load', runScan);
 
 })();
