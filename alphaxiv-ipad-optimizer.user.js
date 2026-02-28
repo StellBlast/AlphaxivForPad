@@ -184,11 +184,13 @@
     }
 
     class ToolManager {
-        constructor(scanner) {
+        constructor(scanner, uiManager) {
             this.scanner = scanner;
+            this.uiManager = uiManager;
             this.isToolsVisible = false;
             this.container = null;
             this.toggleButton = null;
+            this.isZoomed = false;
             this.initStyles();
         }
 
@@ -326,8 +328,49 @@
 
         simulateToolClick(type) {
             log(`Tool clicked: ${type}`);
-            // TODO: Implement actual logic to trigger site's native tools based on heuristic matching
-            // For now, this is a placeholder for the UI
+
+            // Try to find the captured native bubble
+            const nativeBubble = window.__ax_native_bubble;
+
+            if (type === 'highlight' || type === 'comment') {
+                if (nativeBubble && document.body.contains(nativeBubble)) {
+                    // Try to find the specific button inside the bubble
+                    // Usually there's a button with an icon or text related to comment/highlight
+                    const buttons = Array.from(nativeBubble.querySelectorAll('button, a'));
+                    // As a fallback, just click the first button if we can't be sure
+                    let targetBtn = buttons[0];
+
+                    if (targetBtn) {
+                        targetBtn.click();
+                        log(`Clicked native ${type} button inside bubble.`);
+                    } else {
+                         // Fallback: search entire DOM for something that looks like a comment button
+                         const globalBtns = Array.from(document.querySelectorAll('button'));
+                         const globalTarget = globalBtns.find(b => b.textContent.toLowerCase().includes(type) || b.innerHTML.includes('svg'));
+                         if (globalTarget) globalTarget.click();
+                    }
+                } else {
+                     log('Native bubble not found. Text must be selected first.');
+                }
+            } else if (type === 'note') {
+                // Open the bottom sheet to view notes
+                if (this.uiManager && !this.uiManager.isSidebarVisible) {
+                    this.uiManager.toggleSidebar();
+                }
+            } else if (type === 'zoom') {
+                // Toggle Zoom on PDF container
+                const pdf = this.scanner.pdfContainer;
+                if (pdf) {
+                    this.isZoomed = !this.isZoomed;
+                    if (this.isZoomed) {
+                        pdf.style.transform = 'scale(1.2)';
+                        pdf.style.transformOrigin = 'top center';
+                        pdf.style.transition = 'transform 0.3s ease';
+                    } else {
+                        pdf.style.transform = 'scale(1)';
+                    }
+                }
+            }
         }
     }
 
@@ -442,93 +485,15 @@
     }
 
     class InteractionManager {
-        constructor(toolManager) {
-            this.toolManager = toolManager;
+        constructor() {
             this.lastSelectionRect = null;
             this.observer = null;
             this.isInteracting = false;
-            this.quickActionBar = null;
-            this.initStyles();
-        }
-
-        initStyles() {
-            addStyle(`
-                .ax-ipad-quick-action-bar {
-                    position: fixed;
-                    z-index: 10005;
-                    display: flex;
-                    gap: 8px;
-                    padding: 8px;
-                    background: #2c2c2e;
-                    border-radius: 12px;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-                    opacity: 0;
-                    pointer-events: none;
-                    transition: opacity 0.2s;
-                    transform: translateX(-50%);
-                }
-                .ax-ipad-quick-action-bar.visible {
-                    opacity: 1;
-                    pointer-events: auto;
-                }
-                .ax-ipad-action-btn {
-                    width: 40px;
-                    height: 40px;
-                    border-radius: 8px;
-                    border: none;
-                    background: #3a3a3c;
-                    color: white;
-                    font-size: 18px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    cursor: pointer;
-                }
-                .ax-ipad-action-btn:active {
-                    background: #48484a;
-                }
-            `);
         }
 
         init() {
-            this.createQuickActionBar();
             this.listenToSelection();
             this.hijackCommentBubble();
-        }
-
-        createQuickActionBar() {
-             if (this.quickActionBar) return;
-
-             this.quickActionBar = document.createElement('div');
-             this.quickActionBar.className = 'ax-ipad-quick-action-bar';
-
-             // Actions: Highlight, Comment
-             const actions = [
-                 { icon: '🖊️', type: 'highlight' },
-                 { icon: '💬', type: 'comment' }
-             ];
-
-             actions.forEach(action => {
-                 const btn = document.createElement('button');
-                 btn.className = 'ax-ipad-action-btn';
-                 btn.innerHTML = action.icon;
-                 btn.ontouchend = (e) => {
-                     e.preventDefault();
-                     e.stopPropagation();
-                     this.toolManager.simulateToolClick(action.type);
-                     this.hideQuickActionBar();
-                 };
-                 // Also handle click for testing/desktop
-                 btn.onclick = (e) => {
-                     e.preventDefault();
-                     e.stopPropagation();
-                     this.toolManager.simulateToolClick(action.type);
-                     this.hideQuickActionBar();
-                 }
-                 this.quickActionBar.appendChild(btn);
-             });
-
-             document.body.appendChild(this.quickActionBar);
         }
 
         listenToSelection() {
@@ -540,13 +505,10 @@
                     this.lastSelectionRect = range.getBoundingClientRect();
                     this.isInteracting = true;
 
-                    // Show our custom bar
-                    this.showQuickActionBar(this.lastSelectionRect);
-
                     // Reset interaction flag after a delay
                     setTimeout(() => { this.isInteracting = false; }, 2000);
                 } else {
-                    this.hideQuickActionBar();
+                    this.isInteracting = false;
                 }
             };
 
@@ -559,29 +521,6 @@
             document.addEventListener('touchend', () => {
                 setTimeout(handleSelection, 100);
             });
-        }
-
-        showQuickActionBar(rect) {
-            if (!this.quickActionBar) return;
-
-            // Calculate position: Centered above selection
-            let top = rect.top - 60; // Bar height + padding
-            let left = rect.left + (rect.width / 2);
-
-            // Boundary checks
-            if (top < 10) top = rect.bottom + 10; // Flip below if no space on top
-            if (left < 60) left = 60; // Left edge
-            if (left > window.innerWidth - 60) left = window.innerWidth - 60; // Right edge
-
-            this.quickActionBar.style.top = `${top}px`;
-            this.quickActionBar.style.left = `${left}px`;
-            this.quickActionBar.classList.add('visible');
-        }
-
-        hideQuickActionBar() {
-            if (this.quickActionBar) {
-                this.quickActionBar.classList.remove('visible');
-            }
         }
 
         hijackCommentBubble() {
@@ -613,7 +552,9 @@
             const isHighZ = !isNaN(zIndex) && zIndex > 10;
 
             if (isPositioned && isHighZ && this.isInteracting) {
-                log('Potential comment bubble detected. Repositioning...');
+                log('Potential comment bubble detected. Repositioning to right edge...');
+                // Store the bubble globally for the ToolManager to access
+                window.__ax_native_bubble = node;
                 this.repositionBubble(node);
             }
         }
@@ -622,39 +563,41 @@
              if (!this.lastSelectionRect) return;
 
              const rect = this.lastSelectionRect;
+
+             // Move to the right side of the screen, aligned vertically with the selection
+             // This avoids the iOS native text selection handles which appear directly above/below the text
+             let top = rect.top;
+             let right = 24; // 24px from the right edge
+
+             // Screen boundaries check (keep it in viewport)
              const bubbleRect = element.getBoundingClientRect();
-
-             // Calculate optimal position (centered above selection, or below if no space)
-             let top = rect.top - bubbleRect.height - 10;
-             let left = rect.left + (rect.width / 2) - (bubbleRect.width / 2);
-
-             // Screen boundaries check
-             if (top < 10) {
-                 // If too close to top, put it below
-                 top = rect.bottom + 10;
+             if (top + bubbleRect.height > window.innerHeight - 20) {
+                 top = window.innerHeight - bubbleRect.height - 20;
              }
-
-             // Horizontal clamping
-             if (left < 10) left = 10;
-             if (left + bubbleRect.width > window.innerWidth - 10) {
-                 left = window.innerWidth - bubbleRect.width - 10;
+             if (top < 80) { // Keep away from top edge/header
+                 top = 80;
              }
 
              // Apply forced styles
              element.style.position = 'fixed'; // Ensure fixed to screen
              element.style.top = `${top}px`;
-             element.style.left = `${left}px`;
+             element.style.left = `auto`; // Remove left positioning
+             element.style.right = `${right}px`;
              element.style.transform = 'none'; // Remove any existing transforms that might mess up positioning
              element.style.marginTop = '0';
              element.style.marginLeft = '0';
+
+             // Ensure it's very prominent
+             element.style.zIndex = '10006';
+             element.style.boxShadow = '0 8px 30px rgba(0,0,0,0.3)';
         }
     }
 
     // Main Execution
     const scanner = new DOMScanner();
     const uiManager = new UIManager(scanner);
-    const toolManager = new ToolManager(scanner);
-    const interactionManager = new InteractionManager(toolManager);
+    const toolManager = new ToolManager(scanner, uiManager);
+    const interactionManager = new InteractionManager();
 
     // Wait for body to be ready for interaction manager
     const initInteraction = setInterval(() => {
